@@ -1,5 +1,49 @@
-# This is your README file.
+Option Wheel Wizard
 
-I have uploaded this for you, it is customary to have a README file within GitHub to insure that there is some documentation. Please let me know if you needed any other help. Also this is written in a language called "Markdown". I have linked it here [here](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)
+This project is my CIS 260 Capstone, designed to help income traders manage covered calls and cash-secured puts. It has two main tools:
 
-Please let me know if you needed any help. - Md Ali
+-Spike Scanner (option_spikes.py)
+
+Scans option-chain data for sudden premium spikes.
+
+Alerts with ticker, strike, expiration, and % change.
+
+Helps identify opportunities to sell options at inflated premiums.
+
+
+-Buyback Monitor (buyback.py)
+
+Tracks short option positions from a positions.csv file.
+
+Alerts when premiums drop significantly (e.g., −50% or below a target price).
+
+Helps traders buy back options at favorable prices.
+
+
+-Sample Data (positions.csv)
+
+Example file format for tracking sold option positions.
+
+Users can edit with their own trades.
+
+
+-Requirements (requirements.txt)
+
+Lists dependencies (yfinance, pandas, numpy).
+
+Usage
+
+Export option data (from ThinkorSwim, Yahoo Finance, etc.).
+
+Run option_spikes.py to look for premium spikes.
+
+Enter your short positions in positions.csv.
+
+Run buyback.py to get buyback alerts.
+
+
+Status:
+
+Initial scripts uploaded
+Midterm goal: finalize core logic and demonstrate with test data
+Working: optional event awareness (earnings, dividends, macro news) and optimization
