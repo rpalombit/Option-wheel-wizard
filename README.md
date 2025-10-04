@@ -43,10 +43,7 @@ Run buyback.py to get buyback alerts.
 
 
 Status:
-
-Initial scripts uploaded
-Midterm goal: finalize core logic and demonstrate with test data
-Working: optional event awareness (earnings, dividends, macro news) and optimization
+Files on Github removed/deleted during editing, will have GitHub fixed and updated with working statues by Friday October 1oth
 
 
 
