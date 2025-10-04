@@ -47,3 +47,7 @@ Status:
 Initial scripts uploaded
 Midterm goal: finalize core logic and demonstrate with test data
 Working: optional event awareness (earnings, dividends, macro news) and optimization
+
+
+
+Update (v2.0) — Fixed errors found in code, added multi-expiration scan feature, allowing users to scan all option expirations up to a chosen date instead of being limited to a single expiry.
