@@ -1,0 +1,29 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+*.spec
+/build/
+/dist/
+/OptionSuite/build/
+/OptionSuite/dist/
+
+# Logs
+/logs/
+*.log
+*.csv
+
+# Executables
+*.exe
+*.dll
+*.so
+
+# Virtual environments
+venv/
+env/
+
+# System files
+.DS_Store
+Thumbs.db
