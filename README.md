@@ -1,79 +1,64 @@
-# OptionSuite — Option Trading Intelligence Toolkit
+# OptionSuite — Options Trading Intelligence Toolkit
 
-OptionSuite is a real-world options trading assistant designed to improve income strategies such as the Wheel, covered calls, and cash-secured puts. It combines real-time market scanning, option-chain analytics, and automated buyback monitoring into one unified, extensible Python package.
+OptionSuite is a real-world options trading assistant designed to support income strategies such as the Wheel, covered calls, and cash-secured puts.  
+The system combines option-chain analytics, buyback opportunity detection, real-time spike scanning (backend), and a growing multi-tab GUI built with Tkinter.
 
-This repository contains the development version of OptionSuite for CIS-260, aligned with the production tool I am actively building for real trading use.
-
----
-
-## 🚀 Features
-
-### 1. Spike Scanner
-Scans option chains across multiple tickers and expirations, detecting:
-- Premium spikes  
-- IV changes  
-- Spread anomalies  
-- Per-contract cooldowns  
-
-### 2. Buyback Monitor
-Tracks short option positions and alerts when:
-- Target percentages captured  
-- Floor prices hit  
-- Fast drops occur  
-
-### 3. Unified GUI (Tkinter)
-- Market Scanner tab  
-- Buyback / Lookup tab  
-- Live logs + alert table  
-- Presets loader  
-- CSV export  
-- Thread-safe StoppableSpike & StoppableBuyback engines  
+This repository contains the active CIS-260 development version, aligned with the production-grade tool being built for live trading use.
 
 ---
 
-## 📁 Project Structure
-OptionSuite/
-├── OptionSuite_FreshStart.py
-├── OptionSuite_FreshStart_GUI.py
-├── presets/
-│   ├── sp100.txt
-│   ├── sp500.txt
-│   └── nas100.txt
-└── __init__.py
+# 🚀 Features (Current Working State)
 
-README.md
-.gitignore
+## ✅ **1. Preset Ticker Management**
+- Load from `sp100`, `sp500`, `nas100`
+- Manual ticker add/remove
+- Ticker display panel
+- Shared ticker list across modules
+
+## ✅ **2. Spike Scanner (backend ready, GUI stub)**
+Backend:
+- Fully functional premium-spike detection engine  
+GUI:
+- Preset loading  
+- Manual ticker control  
+- Scanner Start/Stop buttons (stubbed)  
+- Live logging  
+Next step: wire GUI inputs into backend `SpikeScanner` configs
+
+## ✅ **3. Buyback Monitor (partially integrated)**
+### Working now:
+- Manual contract entry  
+- Multi-contract paste (CSV-style)  
+- Contract list display  
+- Recent alert feed (top 40 alerts)  
+- Full logging to Logs tab  
+- Options chain viewer via **yfinance**  
+- Double-click chain row → auto-populates manual builder  
+- Start/Stop Buyback engine thread framework
+
+### Not yet wired:
+- Final connection between GUI contracts → backend BuybackMonitor  
+- Automatic use of presets in buyback (planned)  
+
+## ✅ **4. Options Chain Viewer (via yfinance)**
+- Fetches nearest expirations (stable fallback)  
+- Displays:
+  - Strike
+  - Call bid/ask
+  - Put bid/ask
+  - Expiration
+- Sortable columns  
+- Ideal for quickly identifying workable strikes
+
+## ✅ **5. Multi-Tab GUI (Tkinter)**
+- **Scanner**  
+- **Buyback**  
+- **Wheel/CSP module** (placeholder)  
+- **Logs** (full text stream)  
+- Status bar  
+- Dark theme support (`sv_ttk`)
 
 ---
 
-## 🛠 Next Phases
+# 📁 Project Structure
 
-Planned improvements for the next development cycle:
-
-- Auto-save alerts to timestamped CSV files  
-- Add runtime status bar (last scan time, next scan countdown)  
-- Highlight major spikes with color-coding in the GUI  
-- Save GUI settings (persistent config file)  
-- Optional chart visualizer (premium history, IV snapshots)  
-
----
-
-## 🐍 Requirements
-
-Python 3.11 recommended
-
-Required libraries:
-- yfinance  
-- numpy  
-- pandas  
-- tkinter (built into Python on Windows)  
-
-Install dependencies:
-pip install yfinance numpy pandas
-
----
-
-## 📅 Status (Nov 2025)
-
-This repository was rebuilt from scratch using the full midterm working version as the foundation.  
-Old pre-midterm files were removed, and the project was reorganized into a clean folder structure to prepare for the next development phase.
