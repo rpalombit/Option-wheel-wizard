@@ -138,7 +138,9 @@ def fetch_yf_options_chain(symbol: str, max_exps: int = 8) -> List[Dict[str, Any
         'call_ask': float or None,
         'put_bid': float or None,
         'put_ask': float or None,
-        'exp': 'YYYY-MM-DD'
+        'exp': 'YYYY-MM-DD',
+        'call_delta': float or None,
+        'put_delta': float or None
       }
     """
     if yf is None:
@@ -175,14 +177,22 @@ def fetch_yf_options_chain(symbol: str, max_exps: int = 8) -> List[Dict[str, Any
                     "put_bid": None,
                     "put_ask": None,
                     "exp": exp_str,
+                    "call_delta": None,
+                    "put_delta": None,
                 },
             )
             bid = row.get("bid")
             ask = row.get("ask")
+            delta = row.get("delta")
             if bid is not None:
                 r["call_bid"] = float(bid)
             if ask is not None:
                 r["call_ask"] = float(ask)
+            if delta is not None:
+                try:
+                    r["call_delta"] = float(delta)
+                except Exception:
+                    pass
         # puts
         for _, row in puts.iterrows():
             strike = float(row.get("strike", 0.0))
@@ -196,14 +206,22 @@ def fetch_yf_options_chain(symbol: str, max_exps: int = 8) -> List[Dict[str, Any
                     "put_bid": None,
                     "put_ask": None,
                     "exp": exp_str,
+                    "call_delta": None,
+                    "put_delta": None,
                 },
             )
             bid = row.get("bid")
             ask = row.get("ask")
+            delta = row.get("delta")
             if bid is not None:
                 r["put_bid"] = float(bid)
             if ask is not None:
                 r["put_ask"] = float(ask)
+            if delta is not None:
+                try:
+                    r["put_delta"] = float(delta)
+                except Exception:
+                    pass
 
     for exp_str in expirations[:max_exps]:
         process_exp(exp_str)
@@ -213,14 +231,41 @@ def fetch_yf_options_chain(symbol: str, max_exps: int = 8) -> List[Dict[str, Any
     return rows
 
 
+def fetch_underlying_price(symbol: str) -> Optional[float]:
+    """Best-effort yfinance spot price."""
+    if yf is None:
+        return None
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        return None
+    t = yf.Ticker(symbol)
+    # Try fast_info
+    try:
+        fi = getattr(t, "fast_info", None)
+        if fi and "lastPrice" in fi:
+            return float(fi["lastPrice"])
+        if fi and "last_price" in fi:
+            return float(fi["last_price"])
+    except Exception:
+        pass
+    # Fallback: last close
+    try:
+        hist = t.history(period="1d")
+        if not hist.empty:
+            return float(hist["Close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
 # =====================================================
 #  MAIN GUI
 # =====================================================
 class OptionSuiteGUI(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("OptionSuite GUI v4.1")
-        self.geometry("1500x950")
+        self.title("OptionSuite GUI v5 – Spike | Buyback | Wheel Builder")
+        self.geometry("1600x950")
 
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.presets_dir = os.path.join(self.base_dir, "presets")
@@ -244,9 +289,28 @@ class OptionSuiteGUI(tk.Tk):
         # manual contracts (raw core.parse_contract_expr strings)
         self.manual_contract_exprs: List[str] = []
 
-        # options chain table state
+        # options chain table state (Buyback tab)
         self.chain_rows: Dict[str, Dict[str, Any]] = {}  # Treeview iid -> row data
         self.chain_sort_reverse: Dict[str, bool] = {}
+
+        # Wheel/CSP builder state
+        self.builder_symbol_var = tk.StringVar(value="")
+        self.builder_type_var = tk.StringVar(value="CSP")  # CSP or CC
+        self.builder_exp_var = tk.StringVar(value="")
+        self.builder_strike_var = tk.StringVar(value="")
+
+        self.builder_underlying_var = tk.StringVar(value="-")
+        self.builder_premium_var = tk.StringVar(value="-")
+        self.builder_delta_var = tk.StringVar(value="-")
+        self.builder_be_var = tk.StringVar(value="-")
+        self.builder_collateral_var = tk.StringVar(value="-")
+        self.builder_roc_var = tk.StringVar(value="-")
+        self.builder_ann_roc_var = tk.StringVar(value="-")
+        self.builder_prob_var = tk.StringVar(value="-")
+        self.builder_summary_text: str = ""
+
+        self.builder_chain_by_exp: Dict[str, List[Dict[str, Any]]] = {}
+        self.builder_spot_cache: Dict[str, float] = {}
 
         if sv_ttk is not None:
             sv_ttk.set_theme("dark")
@@ -302,7 +366,7 @@ class OptionSuiteGUI(tk.Tk):
 
         self.notebook.add(self.scanner_tab, text="Scanner")
         self.notebook.add(self.buyback_tab, text="Buyback")
-        self.notebook.add(self.wheel_tab, text="Wheel / CSP")
+        self.notebook.add(self.wheel_tab, text="Wheel / CSP Builder")
         self.notebook.add(self.logs_tab, text="Logs")
 
         self.build_scanner_tab()
@@ -518,9 +582,88 @@ class OptionSuiteGUI(tk.Tk):
         ttk.Button(lb_btns, text="Remove Selected", command=self.remove_manual_selected).pack(side="left")
         ttk.Button(lb_btns, text="Clear All", command=self.clear_manual_all).pack(side="left", padx=4)
 
-    # ---------------- Wheel Tab ----------------
+    # ---------------- Wheel / CSP Builder Tab ----------------
     def build_wheel_tab(self) -> None:
-        ttk.Label(self.wheel_tab, text="Wheel / CSP planning (to be added).").pack(pady=20)
+        root = self.wheel_tab
+        outer = ttk.Frame(root, padding=10)
+        outer.pack(fill="both", expand=True)
+
+        # TOP: ticker + fetch
+        top = ttk.Frame(outer)
+        top.pack(fill="x", pady=5)
+
+        ttk.Label(top, text="Ticker:").pack(side="left")
+        ttk.Entry(top, textvariable=self.builder_symbol_var, width=12).pack(side="left", padx=4)
+        ttk.Button(top, text="Fetch Chain", command=self.builder_fetch_chain).pack(side="left", padx=4)
+
+        ttk.Label(top, text="Type:").pack(side="left", padx=(20, 4))
+        rb_frame = ttk.Frame(top)
+        rb_frame.pack(side="left")
+        ttk.Radiobutton(rb_frame, text="CSP (Put)", value="CSP", variable=self.builder_type_var,
+                        command=self.builder_recalc).pack(side="left")
+        ttk.Radiobutton(rb_frame, text="CC (Call)", value="CC", variable=self.builder_type_var,
+                        command=self.builder_recalc).pack(side="left")
+
+        # MID: exp + strike
+        mid = ttk.Frame(outer)
+        mid.pack(fill="x", pady=5)
+
+        ttk.Label(mid, text="Expiration:").pack(side="left")
+        self.builder_exp_combo = ttk.Combobox(mid, textvariable=self.builder_exp_var, width=18, state="readonly")
+        self.builder_exp_combo.pack(side="left", padx=4)
+        self.builder_exp_combo.bind("<<ComboboxSelected>>", lambda e: self.builder_on_exp_change())
+
+        ttk.Label(mid, text="Strike:").pack(side="left", padx=(20, 4))
+        self.builder_strike_combo = ttk.Combobox(mid, textvariable=self.builder_strike_var, width=12, state="readonly")
+        self.builder_strike_combo.pack(side="left", padx=4)
+        self.builder_strike_combo.bind("<<ComboboxSelected>>", lambda e: self.builder_recalc())
+
+        ttk.Button(mid, text="Recalculate", command=self.builder_recalc).pack(side="left", padx=8)
+
+        ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=8)
+
+        # BOTTOM: Metrics
+        metrics = ttk.Frame(outer)
+        metrics.pack(fill="x")
+
+        left = ttk.Frame(metrics)
+        left.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        right = ttk.Frame(metrics)
+        right.pack(side="left", fill="x", expand=True)
+
+        # Left metrics (price, premium, delta, BE, collateral)
+        def row(parent, r, label, var):
+            ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", pady=2)
+            ttk.Label(parent, textvariable=var).grid(row=r, column=1, sticky="w", pady=2, padx=(4, 0))
+
+        row(left, 0, "Underlying Price:", self.builder_underlying_var)
+        row(left, 1, "Premium (per share):", self.builder_premium_var)
+        row(left, 2, "Delta:", self.builder_delta_var)
+        row(left, 3, "Breakeven:", self.builder_be_var)
+        row(left, 4, "Collateral (per contract):", self.builder_collateral_var)
+
+        # Right metrics (ROC, annualized, probability)
+        row(right, 0, "ROC % (per contract):", self.builder_roc_var)
+        row(right, 1, "Annualized ROC %:", self.builder_ann_roc_var)
+        row(right, 2, "Assignment / Call-away Prob:", self.builder_prob_var)
+
+        ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=8)
+
+        # ACTIONS
+        actions = ttk.Frame(outer)
+        actions.pack(fill="x", pady=5)
+
+        ttk.Button(actions, text="Add to Buyback Monitor", command=self.builder_add_to_buyback).pack(side="left")
+        ttk.Button(actions, text="Copy Summary to Clipboard", command=self.builder_copy_summary).pack(
+            side="left", padx=10
+        )
+
+        # Info
+        info = ttk.Label(
+            outer,
+            text="Workflow: Choose CSP/CC → Fetch chain → Select expiration & strike → review metrics → Add to Buyback.",
+        )
+        info.pack(anchor="w", pady=4)
 
     # ---------------- Logs Tab ----------------
     def build_logs_tab(self) -> None:
@@ -951,14 +1094,384 @@ class OptionSuiteGUI(tk.Tk):
             self.set_status("Buyback stop requested.")
 
     # =====================================================
+    #  WHEEL / CSP BUILDER LOGIC
+    # =====================================================
+    def builder_fetch_chain(self) -> None:
+        symbol = (self.builder_symbol_var.get() or "").strip().upper()
+        if not symbol:
+            messagebox.showwarning("Builder", "Enter a ticker symbol first.")
+            return
+        if yf is None:
+            messagebox.showerror(
+                "Builder",
+                "yfinance is not installed.\nInstall with:\n\npip install yfinance pandas",
+            )
+            return
+
+        self.logger.log(f"[Builder] Fetching options chain for {symbol}...")
+        self.set_status(f"Fetching chain for {symbol}...")
+
+        try:
+            rows = fetch_yf_options_chain(symbol, max_exps=12)
+        except Exception as e:
+            messagebox.showerror("Builder", f"Error fetching options:\n{e}")
+            self.set_status("Builder chain fetch error.")
+            return
+
+        if not rows:
+            messagebox.showinfo("Builder", f"No options data found for {symbol}.")
+            self.set_status("No chain data found.")
+            return
+
+        # group by expiration
+        by_exp: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            by_exp.setdefault(r["exp"], []).append(r)
+        for exp in by_exp:
+            by_exp[exp].sort(key=lambda x: x["strike"])
+
+        self.builder_chain_by_exp = by_exp
+        exps_sorted = sorted(by_exp.keys())
+        self.builder_exp_combo["values"] = exps_sorted
+
+        if exps_sorted:
+            self.builder_exp_var.set(exps_sorted[0])
+            self.builder_on_exp_change()
+
+        # underlying price
+        spot = fetch_underlying_price(symbol)
+        if spot is not None:
+            self.builder_spot_cache[symbol] = spot
+            self.builder_underlying_var.set(f"${spot:.2f}")
+        else:
+            self.builder_underlying_var.set("-")
+
+        self.logger.log(f"[Builder] Loaded {len(rows)} rows across {len(by_exp)} expirations for {symbol}.")
+        self.set_status(f"Builder: chain loaded for {symbol}.")
+
+    def builder_on_exp_change(self) -> None:
+        exp = self.builder_exp_var.get()
+        if not exp or exp not in self.builder_chain_by_exp:
+            self.builder_strike_combo["values"] = ()
+            self.builder_strike_var.set("")
+            self.builder_recalc()
+            return
+
+        chain = self.builder_chain_by_exp[exp]
+        strikes = [f"{r['strike']:.2f}" for r in chain]
+        self.builder_strike_combo["values"] = strikes
+        if strikes:
+            # pick closest-to-ATM by default
+            symbol = (self.builder_symbol_var.get() or "").strip().upper()
+            spot = self.builder_spot_cache.get(symbol)
+            if spot is not None:
+                closest = min(chain, key=lambda r: abs(r["strike"] - spot))
+                self.builder_strike_var.set(f"{closest['strike']:.2f}")
+            else:
+                self.builder_strike_var.set(strikes[0])
+        self.builder_recalc()
+
+    def _builder_get_selected_row(self) -> Optional[Dict[str, Any]]:
+        exp = self.builder_exp_var.get()
+        if not exp or exp not in self.builder_chain_by_exp:
+            return None
+        chain = self.builder_chain_by_exp[exp]
+        strike_s = self.builder_strike_var.get()
+        if not strike_s:
+            return None
+        try:
+            strike = float(strike_s)
+        except Exception:
+            return None
+        for r in chain:
+            if abs(r["strike"] - strike) < 1e-6:
+                return r
+        return None
+
+    def _builder_mid_price(self, r: Dict[str, Any], is_call: bool) -> Optional[float]:
+        if is_call:
+            bid, ask = r.get("call_bid"), r.get("call_ask")
+        else:
+            bid, ask = r.get("put_bid"), r.get("put_ask")
+        if bid is not None and ask is not None and bid > 0 and ask > 0:
+            return (bid + ask) / 2.0
+        if ask is not None and ask > 0:
+            return float(ask)
+        if bid is not None and bid > 0:
+            return float(bid)
+        return None
+
+    def _builder_delta(self, r: Dict[str, Any], is_call: bool) -> Optional[float]:
+        if is_call:
+            d = r.get("call_delta")
+        else:
+            d = r.get("put_delta")
+        if d is None:
+            return None
+        try:
+            return float(d)
+        except Exception:
+            return None
+
+    def _builder_dte(self, exp_str: str) -> Optional[int]:
+        try:
+            y, m, d = [int(x) for x in exp_str.split("-")]
+            exp_date = dt.date(y, m, d)
+            today = dt.date.today()
+            dte = (exp_date - today).days
+            if dte < 0:
+                return None
+            return max(dte, 1)
+        except Exception:
+            return None
+
+    def _approx_prob_from_delta(self, delta: Optional[float], is_put: bool) -> Optional[float]:
+        if delta is None:
+            return None
+        # For calls, yfinance delta usually positive near 0..1
+        # For puts, usually negative -1..0 → use abs
+        d = abs(delta)
+        p = d * 100.0
+        return max(0.0, min(100.0, p))
+
+    def _approx_prob_from_moneyness(self, S: float, K: float, is_put: bool) -> float:
+        # crude heuristic if no delta
+        if S <= 0:
+            return 50.0
+        m = (K - S) / S if is_put else (S - K) / S
+
+        # distance in % from spot to strike
+        dist = abs(m) * 100.0
+
+        if is_put:
+            # probability S < K
+            if K < S:  # ITM put at start
+                base = 70.0 + min(20.0, (S - K) / S * 100.0)
+            else:  # OTM
+                if dist > 25:
+                    base = 10.0
+                elif dist > 15:
+                    base = 25.0
+                elif dist > 8:
+                    base = 40.0
+                elif dist > 4:
+                    base = 55.0
+                else:
+                    base = 65.0
+        else:
+            # probability S > K (call-away)
+            if K < S:  # ITM call
+                base = 75.0 + min(20.0, (S - K) / S * 100.0)
+            else:
+                if dist > 25:
+                    base = 10.0
+                elif dist > 15:
+                    base = 25.0
+                elif dist > 8:
+                    base = 40.0
+                elif dist > 4:
+                    base = 55.0
+                else:
+                    base = 65.0
+
+        return max(0.0, min(100.0, base))
+
+    def builder_recalc(self) -> None:
+        """Recompute all metrics based on builder state."""
+        symbol = (self.builder_symbol_var.get() or "").strip().upper()
+        if not symbol:
+            self.builder_underlying_var.set("-")
+            self.builder_premium_var.set("-")
+            self.builder_delta_var.set("-")
+            self.builder_be_var.set("-")
+            self.builder_collateral_var.set("-")
+            self.builder_roc_var.set("-")
+            self.builder_ann_roc_var.set("-")
+            self.builder_prob_var.set("-")
+            self.builder_summary_text = ""
+            return
+
+        row = self._builder_get_selected_row()
+        exp = self.builder_exp_var.get()
+        if not row or not exp:
+            self.builder_premium_var.set("-")
+            self.builder_delta_var.set("-")
+            self.builder_be_var.set("-")
+            self.builder_collateral_var.set("-")
+            self.builder_roc_var.set("-")
+            self.builder_ann_roc_var.set("-")
+            self.builder_prob_var.set("-")
+            self.builder_summary_text = ""
+            return
+
+        is_csp = (self.builder_type_var.get() or "CSP").upper() == "CSP"
+        is_call = not is_csp
+
+        # spot
+        spot = self.builder_spot_cache.get(symbol)
+        if spot is None:
+            spot = fetch_underlying_price(symbol)
+            if spot is not None:
+                self.builder_spot_cache[symbol] = spot
+
+        if spot is not None:
+            self.builder_underlying_var.set(f"${spot:.2f}")
+        else:
+            self.builder_underlying_var.set("-")
+
+        strike = float(row["strike"])
+        premium = self._builder_mid_price(row, is_call=is_call)
+        delta = self._builder_delta(row, is_call=is_call)
+        dte = self._builder_dte(exp)
+
+        if premium is None:
+            self.builder_premium_var.set("-")
+        else:
+            self.builder_premium_var.set(f"${premium:.2f}")
+
+        if delta is None:
+            self.builder_delta_var.set("-")
+        else:
+            self.builder_delta_var.set(f"{delta:+.2f}")
+
+        # Collateral always K*100 (1 contract)
+        collateral = strike * 100.0
+        self.builder_collateral_var.set(f"${collateral:,.2f}")
+
+        roc = None
+        ann_roc = None
+        be = None
+        prob = None
+
+        if premium is not None and spot is not None and dte is not None:
+            if is_csp:
+                # CSP logic
+                be = strike - premium
+                roc = (premium / strike) * 100.0 if strike > 0 else None
+                ann_roc = roc * (365.0 / dte) if roc is not None else None
+                prob = self._approx_prob_from_delta(delta, is_put=True)
+                if prob is None:
+                    prob = self._approx_prob_from_moneyness(spot, strike, is_put=True)
+            else:
+                # Covered Call logic
+                upside = max(0.0, strike - spot)
+                max_profit = upside + premium
+                roc = (max_profit / spot) * 100.0 if spot > 0 else None
+                ann_roc = roc * (365.0 / dte) if roc is not None else None
+                prob = self._approx_prob_from_delta(delta, is_put=False)
+                if prob is None:
+                    prob = self._approx_prob_from_moneyness(spot, strike, is_put=False)
+
+        if be is not None:
+            self.builder_be_var.set(f"${be:.2f}")
+        else:
+            self.builder_be_var.set("-")
+
+        if roc is not None:
+            self.builder_roc_var.set(f"{roc:.2f}%")
+        else:
+            self.builder_roc_var.set("-")
+
+        if ann_roc is not None:
+            self.builder_ann_roc_var.set(f"{ann_roc:.2f}%")
+        else:
+            self.builder_ann_roc_var.set("-")
+
+        if prob is not None:
+            self.builder_prob_var.set(f"{prob:.1f}%")
+        else:
+            self.builder_prob_var.set("-")
+
+        # Summary text
+        typ = "CSP" if is_csp else "CC"
+        side = "PUT" if is_csp else "CALL"
+        dte_str = f"{dte}d" if dte is not None else "N/A"
+        prem_str = f"${premium:.2f}" if premium is not None else "N/A"
+        be_str = f"${be:.2f}" if be is not None else "N/A"
+        roc_str = f"{roc:.2f}%" if roc is not None else "N/A"
+        ann_str = f"{ann_roc:.2f}%" if ann_roc is not None else "N/A"
+        prob_str = f"{prob:.1f}%" if prob is not None else "N/A"
+
+        summary_lines = [
+            f"{symbol} {typ} setup:",
+            f"  Exp: {exp}  Strike: {strike:.2f}  Type: {side}",
+            f"  Spot: ${spot:.2f}" if spot is not None else "  Spot: N/A",
+            f"  Premium: {prem_str}",
+            f"  Breakeven: {be_str}",
+            f"  ROC: {roc_str}  Annualized: {ann_str}  Horizon: {dte_str}",
+            f"  Assignment/Call-away probability: {prob_str}",
+        ]
+        self.builder_summary_text = "\n".join(summary_lines)
+
+    def builder_add_to_buyback(self) -> None:
+        """Build a contract expression and push to Buyback manual list."""
+        symbol = (self.builder_symbol_var.get() or "").strip().upper()
+        exp = (self.builder_exp_var.get() or "").strip()
+        strike_s = (self.builder_strike_var.get() or "").strip()
+        if not symbol or not exp or not strike_s:
+            messagebox.showwarning(
+                "Builder",
+                "You must have a ticker, expiration, and strike selected before adding to Buyback.",
+            )
+            return
+
+        try:
+            float(strike_s)
+        except Exception:
+            messagebox.showerror("Builder", "Strike is not numeric.")
+            return
+
+        is_csp = (self.builder_type_var.get() or "CSP").upper() == "CSP"
+        kind_code = "P" if is_csp else "C"
+
+        # Use premium if we have one
+        open_price = None
+        prem_text = self.builder_premium_var.get()
+        if prem_text and prem_text.startswith("$"):
+            try:
+                open_price = float(prem_text.replace("$", ""))
+            except Exception:
+                open_price = None
+
+        parts = [
+            f"ticker={symbol}",
+            f"type={kind_code}",
+            f"strike={strike_s}",
+            f"expiry={exp}",
+        ]
+        if open_price is not None:
+            parts.append(f"open={open_price:.2f}")
+        expr = " ".join(parts)
+
+        self.manual_contract_exprs.append(expr)
+        self.manual_listbox.insert("end", expr)
+        self.logger.log(f"[Builder] Added to Buyback: {expr}")
+        self.set_status("Builder contract added to Buyback manual list.")
+        messagebox.showinfo(
+            "Builder",
+            "Contract added to Buyback monitor list.\n\nStart the Buyback tab when ready.",
+        )
+
+    def builder_copy_summary(self) -> None:
+        if not self.builder_summary_text:
+            messagebox.showinfo("Builder", "No summary available yet. Fetch chain and select a contract first.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(self.builder_summary_text)
+        self.logger.log("[Builder] Copied summary to clipboard.")
+        self.set_status("Builder summary copied to clipboard.")
+
+    # =====================================================
     #  MISC
     # =====================================================
     def show_about(self) -> None:
         messagebox.showinfo(
             "About OptionSuite",
-            "OptionSuite GUI v4.1\n"
-            "Buyback monitor + options chain via yfinance.\n"
-            "Scanner wiring to Spike engine next.",
+            "OptionSuite GUI v5\n"
+            "- Spike Scanner (stubbed)\n"
+            "- Buyback monitor wired to core\n"
+            "- Wheel/CSP Position Builder using yfinance.\n"
+            "\nNext steps: wire Scanner to Spike engine and later add Wheel dashboard.",
         )
 
 
