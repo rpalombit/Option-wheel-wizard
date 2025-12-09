@@ -20,9 +20,10 @@ This is both the final project submission **and** the real tool I use in live tr
 
 ---
 
-## Project Structure  
+## Project Structure
 
 
+'''
 /Option-wheel-wizard/
 │
 ├── OptionSuite_GUI_v5.py # Final GUI (Scanner + Buyback + Wheel Builder)
@@ -33,7 +34,7 @@ This is both the final project submission **and** the real tool I use in live tr
 │ └── nas100.txt
 ├── README.md # Documentation (this file)
 └── .gitignore
-
+'''
 ---
 
 
