@@ -86,6 +86,56 @@ class BuybackGuiLog:
 
 
 # =====================================================
+#  SPIKE LOGGER ADAPTER
+# =====================================================
+class GuiSpikeLogger:
+    """
+    Adapter so SpikeScanner alerts go to GUI Scanner tab + Logs tab.
+
+    It must implement a .write(row) method compatible with core.AlertLog usage.
+    """
+
+    def __init__(self, gui: "OptionSuiteGUI"):
+        self.gui = gui
+
+    def _insert_row(self, vals: Tuple[Any, ...], log_line: str) -> None:
+        # Insert into scanner alert table
+        self.gui.alert_table.insert("", "end", values=vals)
+        self.gui.logger.log(log_line)
+
+    def write(self, row: List[Any]) -> None:
+        """
+        Expected core spike line format:
+        [timestamp, 'SPIKE', tk, exp, type, strike, from, to, abs, pct, iv, spr, extra]
+        """
+        try:
+            ts, kind, tk_sym, exp, oc_type, strike, old_s, new_s, abs_s, pct_s, iv_s, spr_s = row[:12]
+        except Exception:
+            # If anything weird, just ignore to avoid crashing GUI
+            return
+
+        # Values for Scanner Treeview:
+        # columns = ("ticker", "strike", "exp", "premium", "pct", "volume", "time")
+        vals = (
+            tk_sym,
+            strike,
+            exp,
+            new_s,     # premium now
+            pct_s,     # % change
+            "",        # volume not present in spike engine right now
+            ts,
+        )
+        log_line = f"[Spike] {tk_sym} {exp} {oc_type}{strike} Δ{pct_s}"
+
+        # Schedule on main thread (tkinter not thread-safe)
+        try:
+            self.gui.after(0, self._insert_row, vals, log_line)
+        except Exception:
+            # If GUI is closing, ignore
+            pass
+
+
+# =====================================================
 #  STOPPABLE BUYBACK RUNNER
 # =====================================================
 class StoppableBuyback(core.BuybackMonitor if core else object):
@@ -122,6 +172,59 @@ class StoppableBuyback(core.BuybackMonitor if core else object):
             wait = max(0, self.cfg.interval_secs - int(elapsed))
             if self._stop.wait(wait):
                 break
+
+
+# =====================================================
+#  STOPPABLE SPIKE RUNNER
+# =====================================================
+class StoppableSpike:
+    """
+    Wraps core.SpikeScanner with a stop event and routes alerts into the GUI.
+    """
+
+    def __init__(self, cfg: core.SpikeConfig, gui_logger: GuiSpikeLogger):
+        self.cfg = cfg
+        self.gui_logger = gui_logger
+        self._stop = threading.Event()
+
+        # Resolve presets_dir from GUI if present
+        gui = gui_logger.gui
+        presets_dir = getattr(gui, "presets_dir", os.path.join(os.path.dirname(__file__), "presets"))
+
+        self.engine = core.SpikeScanner(cfg, presets_dir=presets_dir)
+        # Override engine's AlertLog with GUI logger
+        self.engine.alert_log = gui_logger
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def run_gui_loop(self) -> None:
+        gui = self.gui_logger.gui
+        try:
+            tks = self.engine.resolve_tickers()
+        except Exception as e:
+            gui.logger.log(f"[Spike ERROR] resolve_tickers: {e}")
+            return
+
+        gui.logger.log(
+            f"[Spike] Starting scanner on {len(tks)} tickers | "
+            f"min_abs=${self.cfg.min_abs} | min_pct={self.cfg.min_pct}% | "
+            f"exp_filter={self.cfg.exp_filter}"
+        )
+
+        while not self._stop.is_set():
+            t0 = time.time()
+            try:
+                # only one pass per loop
+                self.engine._scan_once(tks)
+            except Exception as e:
+                gui.logger.log(f"[Spike ERROR] scan: {e}")
+            elapsed = time.time() - t0
+            wait = max(0, self.cfg.interval_secs - int(elapsed))
+            if self._stop.wait(wait):
+                break
+
+        gui.logger.log("[Spike] Scanner stopped.")
 
 
 # =====================================================
@@ -273,7 +376,7 @@ class OptionSuiteGUI(tk.Tk):
         # state
         self.tickers: List[str] = []  # global ticker list from presets/manual
         self.scan_thread: Optional[threading.Thread] = None
-        self.scan_runner = None  # future Spike scanner
+        self.scan_runner = None  # StoppableSpike instance
 
         self.buy_thread: Optional[threading.Thread] = None
         self.buy_runner: Optional[StoppableBuyback] = None
@@ -752,18 +855,74 @@ class OptionSuiteGUI(tk.Tk):
         self.set_status("All tickers cleared.")
 
     # =====================================================
-    #  SCANNER (STUB FOR NOW)
+    #  SCANNER (WIRED TO SPIKE ENGINE)
     # =====================================================
     def start_scanner(self) -> None:
+        if core is None:
+            messagebox.showerror(
+                "Scanner",
+                "core module (OptionSuite_FreshStart.py) not found.\n"
+                "Place it in the same folder as this GUI script.",
+            )
+            return
+
         if not self.tickers:
             messagebox.showwarning("Scanner", "Load a preset or add tickers first.")
             return
-        self.logger.log(f"[Scanner] Starting on {len(self.tickers)} tickers (stub).")
-        self.set_status("Scanner started (stub).")
+
+        if self.scan_thread and self.scan_thread.is_alive():
+            messagebox.showinfo("Scanner", "Spike scanner is already running.")
+            return
+
+        # Read GUI controls
+        try:
+            cooldown = int(self.cooldown_var.get())
+            min_pct = float(self.min_spike_var.get())
+            max_days = int(self.exp_range_var.get())
+        except Exception:
+            messagebox.showerror("Scanner", "Invalid numeric values in scanner settings.")
+            return
+
+        cutoff_date = (dt.date.today() + dt.timedelta(days=max_days)).isoformat()
+
+        # Build SpikeConfig from GUI
+        cfg = core.SpikeConfig(
+            tickers=self.tickers,
+            exp_filter=cutoff_date,          # "exp ≤ days" converted to cutoff date
+            kind="both",                     # both calls and puts for now
+            strike_filter="",                # all strikes
+            min_abs=0.01,                    # small floor; GUI focuses on % spike
+            min_pct=min_pct,
+            min_premium=0.10,
+            max_spread_pct=0.80,
+            cooldown_secs=cooldown,
+            interval_secs=30,                # fixed 30s loop for demo
+            workers=4,
+            log_path=None,
+            max_contracts_per_ticker=200,
+            verbose=False,
+        )
+
+        gui_logger = GuiSpikeLogger(self)
+        self.scan_runner = StoppableSpike(cfg, gui_logger)
+
+        def bg():
+            self.scan_runner.run_gui_loop()
+
+        self.scan_thread = threading.Thread(target=bg, daemon=True)
+        self.scan_thread.start()
+
+        self.logger.log("[Scanner] Spike scanner started.")
+        self.set_status("Spike Scanner running.")
 
     def stop_scanner(self) -> None:
-        self.logger.log("[Scanner] Stop requested (stub).")
-        self.set_status("Scanner stopped (stub).")
+        if self.scan_runner:
+            self.scan_runner.stop()
+            self.logger.log("[Scanner] Stop signal sent.")
+            self.set_status("Spike Scanner stopping...")
+        else:
+            self.logger.log("[Scanner] No active scanner.")
+            self.set_status("No active scanner.")
 
     # =====================================================
     #  BUYBACK HELPERS
@@ -1092,6 +1251,9 @@ class OptionSuiteGUI(tk.Tk):
             self.buy_runner.stop()
             self.logger.log("[Buyback] Stop signal sent.")
             self.set_status("Buyback stop requested.")
+        else:
+            self.logger.log("[Buyback] No active buyback.")
+            self.set_status("No active buyback.")
 
     # =====================================================
     #  WHEEL / CSP BUILDER LOGIC
@@ -1228,8 +1390,6 @@ class OptionSuiteGUI(tk.Tk):
     def _approx_prob_from_delta(self, delta: Optional[float], is_put: bool) -> Optional[float]:
         if delta is None:
             return None
-        # For calls, yfinance delta usually positive near 0..1
-        # For puts, usually negative -1..0 → use abs
         d = abs(delta)
         p = d * 100.0
         return max(0.0, min(100.0, p))
@@ -1468,10 +1628,10 @@ class OptionSuiteGUI(tk.Tk):
         messagebox.showinfo(
             "About OptionSuite",
             "OptionSuite GUI v5\n"
-            "- Spike Scanner (stubbed)\n"
+            "- Spike Scanner wired to core\n"
             "- Buyback monitor wired to core\n"
             "- Wheel/CSP Position Builder using yfinance.\n"
-            "\nNext steps: wire Scanner to Spike engine and later add Wheel dashboard.",
+            "\nThis version is a working capstone-ready prototype.",
         )
 
 
